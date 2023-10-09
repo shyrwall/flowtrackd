@@ -20,7 +20,7 @@ my %tcp_flags=(FIN => FIN,
                ECE => ECE,
                CWR => CWR);
 
-my $pcap = pcap_open_live("eth0", 1024, 0, 1000, \$err);
+my $pcap = pcap_open_live("eth0", 74, 0, 1000, \$err);
 my $filter;
 pcap_compile($pcap, \$filter, "tcp and (tcp[tcpflags] & (tcp-syn|tcp-rst) != 0)", 1, 0);
 pcap_setfilter($pcap, $filter);
