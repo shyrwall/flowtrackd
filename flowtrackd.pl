@@ -4,17 +4,20 @@ use NetPacket::Ethernet qw(:strip);
 use NetPacket::IP qw(:strip);
 use NetPacket::TCP;
 use Net::RawIP;
+use Net::Subnet qw(subnet_matcher);
 use Data::Dumper;
 
 # Implement Cloudflares TCP Reset Cookies in Perl
 
 my $nic = $ARGV[0]; 
+
+my $ipset = "/usr/sbin/ipset";
 my $ipset_whitelist = $nic;
 $ipset_whitelist =~ s/\./_/;
 $ipset_whitelist = "shield_whitelist_$ipset_whitelist";
 
 # Flush whitelist
-system qq(/usr/sbin/ipset flush $ipset_whitelist);
+system qq($ipset flush $ipset_whitelist);
 
 my $debug = 0;
 my $err = '';
@@ -29,6 +32,11 @@ my %tcp_flags=(FIN => FIN,
                URG => URG,
                ECE => ECE,
                CWR => CWR);
+
+# Ignore CF
+my $ignored_pfxs = subnet_matcher("103.31.4.0/22","173.245.48.0/20","162.158.0.0/15","197.234.240.0/22","172.64.0.0/13","198.41.128.0/17","104.24.0.0/14","131.0.72.0/22","104.16.0.0/13",
+                    "141.101.64.0/18","108.162.192.0/18","103.21.244.0/22","103.22.200.0/22","188.114.96.0/20","190.93.240.0/20");
+
 
 my $pcap = pcap_open_live("$nic", 74, 0, 1000, \$err);
 my $filter;
@@ -47,6 +55,7 @@ sub callback {
         my $tcp_data_dec = NetPacket::TCP->decode($ip_data);
 	my $tcp_flags = $tcp_data_dec->{flags};
         my $src_ip = $ip_data_dec->{src_ip};
+	return if $ignored_pfxs->($src_ip);
         my $dst_ip = $ip_data_dec->{dest_ip};
         my $src_port = $tcp_data_dec->{src_port};
         my $dst_port = $tcp_data_dec->{dest_port};
@@ -65,13 +74,13 @@ sub callback {
 		return if $states{$src_ip}{$dst_ip}{$dst_port} != $seqnum;
 		whitelist($src_ip,$dst_ip,$dst_port,$epoch);
 		delete($states{$src_ip}{$dst_ip}{$dst_port});
-		print "Whitelisted $src_ip\n";
+		print "Whitelisted $src_ip - $dst_ip - $dst_port\n";
 	}
 }
 
 sub whitelist() {
 	my ($src_ip,$dst_ip,$dst_port,$epoch) = @_;
-	system qq(ipset add $ipset_whitelist $src_ip,$dst_port,$dst_ip);
+	system qq($ipset add $ipset_whitelist $src_ip,$dst_port,$dst_ip);
 	$whitelisted{$src_ip}{$dst_ip}{$dst_port} = $epoch;
 }
 
@@ -89,14 +98,15 @@ sub send_packet() {
 	                              syn    => 1,
 	                              ack    => 1,
 				      seq    => $ts,
-				      ack_seq => $seqnum -1 ,
+				      ack_seq => $seqnum - 1,
 				      window => $winsize,
 	                             },
 	                     });	
 
-	my $hex_mss = pack ("n", $mss);
-	my $ts = pack ("NN", $epoch, $ts);
-	$n->optset(tcp => { type => [ (2, 4, 8, 1, 3) ], data => [ "$hex_mss", "", $ts, "", "\x07" ] });
+	# Not needed for RST
+	#my $hex_mss = pack ("n", $mss);
+	#my $ts = pack ("NN", $epoch, $ts);
+	#$n->optset(tcp => { type => [ (2, 4, 8, 1, 3) ], data => [ "$hex_mss", "", $ts, "", "\x07" ] });
 	$n->send;
 	$states{$src_ip}{$dst_ip}{$dst_port} = $seqnum -1;
 }
