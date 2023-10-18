@@ -5,6 +5,7 @@ use NetPacket::IP qw(:strip);
 use NetPacket::TCP;
 use Net::RawIP;
 use Net::Subnet qw(subnet_matcher);
+use Redis::Fast;
 use Data::Dumper;
 
 # Implement Cloudflares TCP Reset Cookies in Perl
@@ -12,6 +13,8 @@ use Data::Dumper;
 my $pcap_filter = "tcp and (tcp[tcpflags] & (tcp-syn|tcp-rst) != 0)";
 
 my $nic = $ARGV[0]; 
+my $total_instances = $ARGV[1];
+my $instance = $ARGV[2] - 1;
 
 my $ipset = "/usr/sbin/ipset";
 my $ipset_whitelist = $nic;
@@ -21,11 +24,12 @@ $ipset_whitelist = "shield_whitelist_$ipset_whitelist";
 # Flush whitelist
 system qq($ipset flush $ipset_whitelist);
 
+my %states;
+
+my $redis = Redis::Fast->new;
+
 my $debug = 0;
 my $err = '';
-
-my %states;
-my %whitelisted;
 
 # Ignore CF
 my $ignored_pfxs = subnet_matcher("103.31.4.0/22","173.245.48.0/20","162.158.0.0/15","197.234.240.0/22","172.64.0.0/13","198.41.128.0/17","104.24.0.0/14","131.0.72.0/22","104.16.0.0/13",
@@ -43,6 +47,10 @@ pcap_close($pcap);
 
 sub callback {
         my ($user_data, $hdr, $pkt) = @_;
+
+	my $ts = $hdr->{tv_usec};
+	return if ($ts % $total_instances != $instance);
+ 
         my $eth_data = eth_strip($pkt);
         my $ip_data = ip_strip($eth_data);
         my $ip_data_dec = NetPacket::IP->decode($eth_data);
@@ -59,16 +67,18 @@ sub callback {
 
 	my $epoch = time();
 
-	return if ($epoch - $whitelisted{$src_ip}{$dst_ip}{$dst_port}) < 3600;
-
-	if($tcp_flags == 2) {
-		delete($whitelisted{$src_ip}{$dst_ip}{$dst_port});
+	my $redis_key = $src_ip."_".$dst_ip."_".$dst_port;
+	return if $redis->exists($redis_key);
+	
+	if($tcp_flags == 2 && !$redis->exists($redis_key)) {
 		send_packet($src_ip,$dst_ip,$src_port,$dst_port,$winsize,$seqnum,$options{ts},$options{mss},$epoch);
 		print "Sent invalid cookie to $src_ip\n" if $debug;
 	}
 	if($tcp_flags == 4) {
 		return if $states{$src_ip}{$dst_ip}{$dst_port} != $seqnum;
 		whitelist($src_ip,$dst_ip,$dst_port,$epoch);
+		$redis->set($redis_key, $epoch);
+		$redis->expire($redis_key, 3600);
 		delete($states{$src_ip}{$dst_ip}{$dst_port});
 		print "Whitelisted $src_ip - $dst_ip - $dst_port\n";
 	}
@@ -77,7 +87,6 @@ sub callback {
 sub whitelist() {
 	my ($src_ip,$dst_ip,$dst_port,$epoch) = @_;
 	system qq($ipset add $ipset_whitelist $src_ip,$dst_port,$dst_ip);
-	$whitelisted{$src_ip}{$dst_ip}{$dst_port} = $epoch;
 }
 
 sub send_packet() {
@@ -99,10 +108,6 @@ sub send_packet() {
 	                             },
 	                     });	
 
-	# Not needed for RST
-	#my $hex_mss = pack ("n", $mss);
-	#my $ts = pack ("NN", $epoch, $ts);
-	#$n->optset(tcp => { type => [ (2, 4, 8, 1, 3) ], data => [ "$hex_mss", "", $ts, "", "\x07" ] });
 	$n->send;
 	$states{$src_ip}{$dst_ip}{$dst_port} = $seqnum -1;
 }
