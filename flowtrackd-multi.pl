@@ -21,9 +21,6 @@ my $ipset_whitelist = $nic;
 $ipset_whitelist =~ s/\./_/;
 $ipset_whitelist = "shield_whitelist_$ipset_whitelist";
 
-# Flush whitelist
-system qq($ipset flush $ipset_whitelist);
-
 my %states;
 
 my $redis = Redis::Fast->new;
